@@ -230,7 +230,7 @@ EOF
     # Create health check script
     cat > $RPA_HOME/scripts/health-check-podman.sh << 'EOF'
 #!/bin/bash
-echo "RPA System Health Check"
+echo "🔍 RPA System Health Check"
 echo "=========================="
 
 # Check services
@@ -251,7 +251,181 @@ echo -e "\nResource Usage:"
 sudo -u rpauser podman stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" | head -4
 EOF
 
-    # Make all scripts executable
+    # Create build and start script for after adding source code
+    cat > $RPA_HOME/scripts/build-and-start.sh << 'EOF'
+#!/bin/bash
+# build-and-start.sh - Build containers and start RPA system
+
+set -e
+cd /opt/rpa-system
+
+echo "🔍 Checking for required RPA source files..."
+
+# Check for required files
+required_files=("orchestrator.py" "worker.py" "config.py" "requirements.txt")
+missing_files=()
+
+for file in "${required_files[@]}"; do
+    if [ ! -f "$file" ]; then
+        missing_files+=("$file")
+    fi
+done
+
+if [ ${#missing_files[@]} -gt 0 ]; then
+    echo "Missing required files: ${missing_files[*]}"
+    echo "Please add your RPA source code first!"
+    exit 1
+fi
+
+echo "All required files found"
+
+# Check if automation modules exist
+if [ ! -d "automations" ]; then
+    echo " Warning: automations/ directory not found"
+    echo "   Creating empty automations directory..."
+    sudo -u rpauser mkdir -p automations
+    echo "   You'll need to add your automation modules here"
+fi
+
+echo " Building container images..."
+sudo -u rpauser podman build -t rpa-orchestrator:latest -f containers/orchestrator/Containerfile . || {
+    echo " Failed to build orchestrator container"
+    exit 1
+}
+
+sudo -u rpauser podman build -t rpa-worker:latest -f containers/worker/Containerfile . || {
+    echo " Failed to build worker container"
+    exit 1
+}
+
+echo " Container images built successfully"
+
+echo " Starting RPA system..."
+systemctl start rpa-system
+
+echo " Waiting for services to start..."
+sleep 30
+
+echo " Checking service status..."
+systemctl status rpa-system --no-pager
+
+echo " Running health checks..."
+./scripts/health-check-podman.sh
+
+echo " RPA system started successfully!"
+EOF
+
+    chmod +x $RPA_HOME/scripts/build-and-start.sh
+    
+    # Create template files script
+    cat > $RPA_HOME/scripts/create-template-files.sh << 'TEMPLATE_EOF'
+#!/bin/bash
+# create-template-files.sh - Create template RPA files for testing
+
+set -e
+cd /opt/rpa-system
+
+echo "🏗️  Creating template RPA files for testing..."
+
+# Create minimal orchestrator.py
+cat > orchestrator.py << 'EOF'
+#!/usr/bin/env python3
+"""Template RPA Orchestrator"""
+import os, logging
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(" RPA Orchestrator starting...")
+    yield
+    logger.info(" RPA Orchestrator shutting down...")
+
+app = FastAPI(title="RPA Orchestrator", lifespan=lifespan)
+
+@app.get("/")
+async def root():
+    return {"message": "RPA Orchestrator is running", "status": "active"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "orchestrator"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=os.getenv("ORCHESTRATOR_HOST", "0.0.0.0"), 
+               port=int(os.getenv("ORCHESTRATOR_PORT", "8620")))
+EOF
+
+# Create minimal worker.py
+cat > worker.py << 'EOF'
+#!/usr/bin/env python3
+"""Template RPA Worker"""
+import os, logging
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(" RPA Worker starting...")
+    yield
+    logger.info(" RPA Worker shutting down...")
+
+app = FastAPI(title="RPA Worker", lifespan=lifespan)
+
+@app.get("/")
+async def root():
+    return {"message": "RPA Worker is running", "status": "active"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "worker"}
+
+@app.post("/execute")
+async def execute_job(job_data: dict):
+    return {"status": "success", "message": "Template execution completed"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=os.getenv("WORKER_HOST", "0.0.0.0"), 
+               port=int(os.getenv("WORKER_PORT", "8621")))
+EOF
+
+# Create minimal config.py
+cat > config.py << 'EOF'
+"""Template RPA Configuration"""
+import os
+from pathlib import Path
+
+class Config:
+    BASE_DATA_DIR = os.getenv("BASE_DATA_DIR", "./data")
+    LOG_DIR = os.path.join(BASE_DATA_DIR, "logs")
+    ORCHESTRATOR_HOST = os.getenv("ORCHESTRATOR_HOST", "0.0.0.0")
+    ORCHESTRATOR_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8620"))
+    WORKER_HOST = os.getenv("WORKER_HOST", "0.0.0.0")
+    WORKER_PORT = int(os.getenv("WORKER_PORT", "8621"))
+    
+    @classmethod
+    def setup_directories(cls):
+        Path(cls.BASE_DATA_DIR).mkdir(parents=True, exist_ok=True)
+        Path(cls.LOG_DIR).mkdir(parents=True, exist_ok=True)
+EOF
+
+# Create basic automations
+mkdir -p automations
+touch automations/__init__.py
+
+chown -R rpauser:rpauser .
+echo " Template files created! Run './scripts/build-and-start.sh' to test."
+TEMPLATE_EOF
+
+    chmod +x $RPA_HOME/scripts/create-template-files.sh
     chmod +x $RPA_HOME/scripts/*.sh
     chown -R $RPA_USER:$RPA_GROUP $RPA_HOME/scripts/
     
@@ -373,6 +547,55 @@ main_rhel10() {
     configure_selinux
     
     # Generate configurations with RHEL 10 optimizations
+    generate_configurations
+    
+    # Create requirements.txt with correct dependencies
+    create_requirements_file() {
+        info "Creating requirements.txt with RPA dependencies..."
+        
+        cat > $RPA_HOME/requirements.txt << 'EOF'
+# Core FastAPI dependencies
+fastapi
+uvicorn[standard]
+pydantic
+
+# HTTP Client
+requests
+
+# Scheduling
+apscheduler
+
+# Database and ORM
+sqlalchemy
+
+# Retry Logic
+tenacity
+
+# Environment Configuration
+python-dotenv
+
+# Authentication and Security
+bcrypt
+pyjwt[crypto]
+
+# Web Automation
+selenium
+
+# 2FA/OTP Support
+pyotp
+
+# System Monitoring
+psutil
+EOF
+        
+        chown $RPA_USER:$RPA_GROUP $RPA_HOME/requirements.txt
+        chmod 644 $RPA_HOME/requirements.txt
+        
+        success "requirements.txt created with $(wc -l < $RPA_HOME/requirements.txt) dependencies"
+        info "Requirements file contents:"
+        cat $RPA_HOME/requirements.txt
+    }
+    
     generate_configurations() {
         info "Generating optimized configurations..."
         
@@ -495,6 +718,54 @@ EOF
     create_containerfiles
     create_native_podman_scripts
     create_systemd_service_native
+    check_rpa_source_code
+    
+    # Check if RPA source code exists and provide instructions
+    check_rpa_source_code() {
+        info "Checking for RPA source code..."
+        
+        required_files=("orchestrator.py" "worker.py" "config.py")
+        missing_files=()
+        
+        for file in "${required_files[@]}"; do
+            if [ ! -f "$RPA_HOME/$file" ]; then
+                missing_files+=("$file")
+            fi
+        done
+        
+        if [ ${#missing_files[@]} -eq 0 ]; then
+            success "All required RPA source files found!"
+            info "Ready to build and start containers"
+        else
+            warning "Missing RPA source files: ${missing_files[*]}"
+            info "You need to copy your RPA source code to $RPA_HOME/"
+            info "Required files:"
+            printf "  • %s\n" "${required_files[@]}"
+            
+            if [ ! -d "$RPA_HOME/automations" ]; then
+                info "  • automations/ directory (with your automation modules)"
+            fi
+            
+            info ""
+            info " TO ADD YOUR RPA SOURCE CODE:"
+            info "================================"
+            info "Option 1 - From local machine:"
+            info "  scp -r /path/to/your/rpa/files/* ec2-user@$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):/tmp/"
+            info "  sudo cp -r /tmp/your-files/* $RPA_HOME/"
+            info "  sudo chown -R $RPA_USER:$RPA_GROUP $RPA_HOME/"
+            info ""
+            info "Option 2 - From Git repository:"
+            info "  cd $RPA_HOME"
+            info "  sudo -u $RPA_USER git clone https://github.com/your-repo/rpa-project.git temp"
+            info "  sudo -u $RPA_USER cp -r temp/* ."
+            info "  sudo -u $RPA_USER rm -rf temp"
+            info ""
+            info "After adding your source code, run:"
+            info "  systemctl start rpa-system"
+        fi
+    }
+    
+    create_containerfiles
     
     # Final setup
     chown -R $RPA_USER:$RPA_GROUP $RPA_HOME
@@ -508,11 +779,30 @@ EOF
     echo "================================================"
     echo "Installation Directory: $RPA_HOME"
     echo "Admin Password: $(cat $RPA_HOME/.admin-password)"
+    echo "Requirements.txt:  Created with $(wc -l < $RPA_HOME/requirements.txt) dependencies"
     echo ""
-    echo "Next Steps:"
+    echo " NEXT STEPS:"
     echo "1. Copy your RPA source code to $RPA_HOME/"
-    echo "2. Start the system: systemctl start rpa-system"
+    echo "   Required files: orchestrator.py, worker.py, config.py, automations/"
+    echo "2. Build and start: $RPA_HOME/scripts/build-and-start.sh"
     echo "3. Check status: $RPA_HOME/scripts/health-check-podman.sh"
+    echo ""
+    echo " FOR TESTING WITHOUT YOUR CODE:"
+    echo "$RPA_HOME/scripts/create-template-files.sh  # Create test files"
+    echo "$RPA_HOME/scripts/build-and-start.sh        # Build and start"
+    echo ""
+    echo " QUICK START COMMANDS:"
+    echo "# Option 1: Test with template files"
+    echo "cd $RPA_HOME && ./scripts/create-template-files.sh && ./scripts/build-and-start.sh"
+    echo ""
+    echo "# Option 2: Add your real RPA code first"
+    echo "# (copy your files to $RPA_HOME/)"
+    echo "cd $RPA_HOME && ./scripts/build-and-start.sh"
+    echo ""
+    echo "Service URLs (after startup):"
+    echo "- Orchestrator: http://$(hostname -I | awk '{print $1}'):8620"
+    echo "- Worker 1: http://$(hostname -I | awk '{print $1}'):8621"
+    echo "- Worker 2: http://$(hostname -I | awk '{print $1}'):8622"
     echo "================================================"
 }
 
