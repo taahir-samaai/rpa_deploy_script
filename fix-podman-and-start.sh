@@ -10,7 +10,7 @@ echo "=================================================="
 # 1. Create missing requirements.txt
 echo "📦 1. CREATING REQUIREMENTS.TXT:"
 echo "-------------------------------"
-cat > requirements.txt << 'EOF'
+cat > requirements.txt << 'EOF2'
 fastapi
 uvicorn[standard]
 pydantic
@@ -24,7 +24,7 @@ pyjwt[crypto]
 selenium
 pyotp
 psutil
-EOF
+EOF2
 
 chown rpauser:rpauser requirements.txt
 echo "✅ requirements.txt created with $(wc -l < requirements.txt) dependencies"
@@ -55,8 +55,24 @@ echo "----------------------------------------"
 sudo -u rpauser podman system reset --force || true
 sudo -u rpauser podman system info | grep -E "(runRoot|graphRoot|rootless)" || true
 
-# 4. Alternative: Run containers as root (workaround)
-echo -e "\n🚀 4. BUILDING AND STARTING CONTAINERS (AS ROOT - WORKAROUND):"
+# 4. Update Containerfiles to use public UBI image instead of Red Hat registry
+echo -e "\n🔄 4. UPDATING CONTAINERFILES TO USE PUBLIC UBI IMAGE:"
+echo "------------------------------------------------------"
+
+# Update orchestrator Containerfile
+if [ -f containers/orchestrator/Containerfile ]; then
+    sed -i 's|registry.redhat.io/ubi9/python-311:latest|registry.access.redhat.com/ubi9/python-311:latest|' containers/orchestrator/Containerfile
+    echo "✅ Updated orchestrator Containerfile to use public UBI image"
+fi
+
+# Update worker Containerfile  
+if [ -f containers/worker/Containerfile ]; then
+    sed -i 's|registry.redhat.io/ubi9/python-311:latest|registry.access.redhat.com/ubi9/python-311:latest|' containers/worker/Containerfile
+    echo "✅ Updated worker Containerfile to use public UBI image"
+fi
+
+# 5. Alternative: Run containers as root (workaround)
+echo -e "\n🚀 5. BUILDING AND STARTING CONTAINERS (AS ROOT - WORKAROUND):"
 echo "------------------------------------------------------------"
 
 # Create root-mode startup script
@@ -153,14 +169,15 @@ ROOTEOF
 
 chmod +x scripts/start-system-root.sh
 
-# 5. Run the root-mode startup
-echo -e "\n🚀 5. STARTING SYSTEM WITH ROOT PERMISSIONS:"
+# 6. Run the root-mode startup
+echo -e "\n🚀 6. STARTING SYSTEM WITH ROOT PERMISSIONS:"
 echo "------------------------------------------"
 ./scripts/start-system-root.sh
 
 echo -e "\n🎯 SUMMARY:"
 echo "=========="
 echo "✅ requirements.txt created"
-echo "✅ User namespace mappings fixed"  
+echo "✅ User namespace mappings fixed"
+echo "✅ Containerfiles updated to use public UBI images"
 echo "🔧 Using root-mode Podman as workaround for namespace issues"
 echo "🚀 RPA System should now be running!"
