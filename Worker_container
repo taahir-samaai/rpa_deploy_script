@@ -46,8 +46,6 @@ COPY --chown=rpauser:rpauser rpa_botfarm/worker.py ./
 COPY --chown=rpauser:rpauser rpa_botfarm/config.py ./
 COPY --chown=rpauser:rpauser rpa_botfarm/models.py ./
 COPY --chown=rpauser:rpauser rpa_botfarm/errors.py ./
-COPY --chown=rpauser:rpauser rpa_botfarm/totp_generator.py ./
-COPY --chown=rpauser:rpauser rpa_botfarm/test_framework.py ./
 
 # Copy automation modules - this is the key part for your RPA system
 COPY --chown=rpauser:rpauser rpa_botfarm/automations/ ./automations/
