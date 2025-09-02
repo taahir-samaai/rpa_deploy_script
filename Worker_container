@@ -1,0 +1,73 @@
+cat > containers/worker/Containerfile << 'EOF'
+# Use Selenium Chrome container as base - avoids Chrome installation pain
+FROM selenium/standalone-chrome:latest as chrome-base
+
+# Switch to Python slim with Chrome binaries copied
+FROM python:3.11-slim
+
+USER root
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y \
+        sqlite3 gcc curl wget unzip \
+        libxcomposite1 libxdamage1 libxrandr2 libxss1 \
+        libasound2 libatk1.0-0 libdrm2 \
+        libgtk-3-0 libxshmfence1 libgbm1 \
+        fonts-liberation libnss3 libxcursor1 \
+        libxinerama1 libxtst6 xdg-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy Chrome and ChromeDriver from selenium image
+COPY --from=chrome-base /usr/bin/google-chrome /usr/bin/google-chrome
+COPY --from=chrome-base /usr/bin/chromedriver /usr/bin/chromedriver
+COPY --from=chrome-base /opt/google/chrome/ /opt/google/chrome/
+
+# Fix permissions and symlinks
+RUN chmod +x /usr/bin/google-chrome /usr/bin/chromedriver && \
+    ln -sf /usr/bin/google-chrome /usr/bin/chromium && \
+    ln -sf /usr/bin/chromedriver /usr/local/bin/chromedriver
+
+# Create application user
+RUN useradd -m -u 1001 rpauser && \
+    mkdir -p /app && \
+    chown -R rpauser:rpauser /app
+
+USER rpauser
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt ./
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+# Copy core application files for worker
+COPY --chown=rpauser:rpauser rpa_botfarm/worker.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/config.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/models.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/errors.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/totp_generator.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/test_framework.py ./
+
+# Copy automation modules - this is the key part for your RPA system
+COPY --chown=rpauser:rpauser rpa_botfarm/automations/ ./automations/
+
+# Copy drivers if they exist
+COPY --chown=rpauser:rpauser rpa_botfarm/drivers/ ./drivers/
+
+# Create required directories
+RUN mkdir -p data/logs data/screenshots data/evidence worker_data
+
+# Environment variables for Chrome
+ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+ENV CHROME_BIN=/usr/bin/google-chrome
+ENV HEADLESS=true
+ENV NO_SANDBOX=true
+ENV DISABLE_DEV_SHM_USAGE=true
+
+EXPOSE 8621
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8621/health || exit 1
+
+CMD ["python", "worker.py"]
+EOF
