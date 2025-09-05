@@ -1154,16 +1154,6 @@ EOF
 
 # Main deployment function
 main() {
-    echo -e "${CYAN}"
-    cat << 'BANNER'
-    ____  ____   _        ____        __        __         _             
-   |  _ \|  _ \ / \      | ___|      / /__     / /___  _ __| | _____ _ __ 
-   | |_) | |_) / _ \     |___ \     / / \ \   / // _ \| '__| |/ / _ \ '__|
-   |  _ <|  __/ ___ \     ___) |   / /   \ \_/ /| (_) | |  |   <  __/ |   
-   |_| \_\_| /_/   \_\   |____/   /_/     \___/  \___/|_|  |_|\_\___|_|   
-                                                                         
-       5-Worker Production Deployment System
-BANNER
     echo -e "${NC}"
     
     info "Starting RPA 5-worker production deployment..."
