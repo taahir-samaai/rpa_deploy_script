@@ -698,6 +698,7 @@ python-dotenv==1.0.0
 jinja2==3.1.2
 aiofiles==23.2.1
 psutil==5.9.6
+pyotp==2.9.0
 
 # Development & Debugging
 python-dateutil==2.8.2
@@ -1336,6 +1337,7 @@ generate_deployment_report() {
 - **Date:** $(date)
 - **Environment:** $ENVIRONMENT_TYPE
 - **Discovery Source:** $DISCOVERY_DIR
+- **Package Type:** Clean Production Package (essential files only)
 - **Deployment Version:** $(date +%Y%m%d-%H%M%S)
 - **Deployed By:** $(whoami)
 - **System Hostname:** $(hostname)
