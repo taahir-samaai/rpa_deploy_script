@@ -340,7 +340,7 @@ generate_production_config() {
     info "Creating configuration for $WORKER_COUNT single-threaded workers..."
     
     # Generate worker endpoints dynamically for 5 workers
-    local worker_endpoints=""
+    local worker_endpoints="\"http://localhost:8621/execute\",\"http://localhost:8622/execute\",\"http://localhost:8623/execute\",\"http://localhost:8624/execute\",\"http://localhost:8625/execute\""
     for ((i=1; i<=WORKER_COUNT; i++)); do
         if [[ $i -eq 1 ]]; then
             worker_endpoints="\"http://worker$i:8621/execute\""
@@ -631,11 +631,7 @@ EOF
 set -e
 cd /opt/rpa-system
 
-echo "🚀 Starting RPA System (5 Workers + 1 Orchestrator)..."
-
-# Create network
-echo "🔗 Setting up network..."
-sudo -u rpauser ./scripts/create-network.sh
+echo "🚀 Starting RPA Pod (5 Workers + 1 Orchestrator)..."
 
 # Set permissions
 echo "🔐 Setting permissions..."
@@ -645,62 +641,111 @@ chown -R rpauser:rpauser volumes/ || true
 echo "🔨 Building containers..."
 sudo -u rpauser ./scripts/build-containers.sh
 
-# Start orchestrator (single-threaded)
-echo "📊 Starting orchestrator (single-threaded)..."
+# Stop and remove existing pod if it exists
+echo "🧹 Cleaning up existing pod..."
+sudo -u rpauser podman pod stop rpa-pod 2>/dev/null || true
+sudo -u rpauser podman pod rm rpa-pod 2>/dev/null || true
+
+# Create pod with all port mappings
+echo "📦 Creating RPA pod with network configuration..."
+sudo -u rpauser podman pod create \
+    --name rpa-pod \
+    --publish 8620:8620 \
+    --publish 8621:8621 \
+    --publish 8622:8622 \
+    --publish 8623:8623 \
+    --publish 8624:8624 \
+    --publish 8625:8625 \
+    --share net,ipc,uts
+
+if ! sudo -u rpauser podman pod exists rpa-pod; then
+    echo "❌ Failed to create RPA pod"
+    exit 1
+fi
+
+echo "✅ RPA pod created successfully"
+
+# Start orchestrator in pod
+echo "📊 Starting orchestrator (single-threaded) in pod..."
 sudo -u rpauser podman run -d \
+    --pod rpa-pod \
     --name rpa-orchestrator \
-    --hostname orchestrator \
-    --network rpa-network \
-    -p 8620:8620 \
     --env-file configs/orchestrator.env \
     -v $(pwd)/volumes/data:/app/data:Z \
     -v $(pwd)/volumes/logs:/app/logs:Z \
-    --restart unless-stopped \
     --memory=ORCHESTRATOR_MEMORY \
     --cpus=1.0 \
     rpa-orchestrator:latest
 
-echo "⏳ Waiting for orchestrator to start..."
+# Verify orchestrator started
+if ! sudo -u rpauser podman ps | grep -q "rpa-orchestrator"; then
+    echo "❌ Failed to start orchestrator"
+    exit 1
+fi
+
+echo "✅ Orchestrator started successfully"
+echo "⏳ Waiting for orchestrator to initialize..."
 sleep 15
 
-# Start 5 workers (each single-threaded)
+# Start 5 workers in the same pod
+echo "👷 Starting 5 workers (single-threaded) in pod..."
 for i in {1..5}; do
     port=$((8620 + i))
-    echo "👷 Starting worker $i (single-threaded) on port $port..."
+    echo "  Starting worker $i (will listen on pod port $port)..."
+    
     sudo -u rpauser podman run -d \
+        --pod rpa-pod \
         --name rpa-worker$i \
-        --hostname worker$i \
-        --network rpa-network \
-        -p $port:8621 \
         --env-file configs/worker.env \
+        -e WORKER_ID=$i \
+        -e WORKER_NAME=worker$i \
+        -e EXTERNAL_PORT=$port \
         -v $(pwd)/volumes/data:/app/data:Z \
         -v $(pwd)/volumes/logs:/app/logs:Z \
-        --restart unless-stopped \
         --memory=WORKER_MEMORY \
         --cpus=1.0 \
         --security-opt seccomp=unconfined \
         --shm-size=1g \
         rpa-worker:latest
     
-    echo "⏳ Waiting for worker $i to initialize..."
-    sleep 5
+    # Verify worker started
+    if ! sudo -u rpauser podman ps | grep -q "rpa-worker$i"; then
+        echo "❌ Failed to start worker $i"
+        exit 1
+    fi
+    
+    echo "  ✅ Worker $i started successfully"
+    sleep 3
 done
 
 echo "⏳ Waiting for all services to initialize..."
 sleep 20
 
-# Health checks for all 6 services
+# Health checks for all 6 services (using localhost since they're in same pod)
 echo "🏥 Checking service health..."
 for port in 8620 8621 8622 8623 8624 8625; do
-    if curl -f -s http://localhost:$port/health >/dev/null 2>&1; then
+    if curl -f -s --max-time 5 http://localhost:$port/health >/dev/null 2>&1; then
         echo "  ✅ Service on port $port: Healthy"
     else
         echo "  ⚠️  Service on port $port: Not responding (may still be starting)"
     fi
 done
 
+# Pod status summary
 echo ""
-echo "🎉 RPA System startup completed!"
+echo "📦 Pod Status:"
+sudo -u rpauser podman pod ps
+echo ""
+echo "📋 Container Status:"
+sudo -u rpauser podman ps --pod
+
+echo ""
+echo "🎉 RPA Pod startup completed!"
+echo "📊 Pod Architecture:"
+echo "  🏠 Pod Name: rpa-pod"
+echo "  🎛️  Orchestrator: rpa-orchestrator (single-threaded)"
+echo "  👷 Workers: rpa-worker1 through rpa-worker5 (single-threaded)"
+echo ""
 echo "📊 Access Points:"
 echo "  🎛️  Orchestrator:    http://$(hostname):8620 (single-threaded)"
 echo "  👷 Worker 1:        http://$(hostname):8621 (single-threaded)"
@@ -712,23 +757,22 @@ echo ""
 echo "🔑 Admin credentials:"
 echo "  Username: admin"
 echo "  Password: $(cat /opt/rpa-system/.admin-password 2>/dev/null || echo 'Check /opt/rpa-system/.admin-password')"
+echo ""
+echo "🎯 Total Capacity: 5 concurrent automation jobs"
 EOF
 
     # 5-worker system shutdown script
-    cat > $RPA_HOME/scripts/stop-system.sh << 'EOF'
+   cat > $RPA_HOME/scripts/stop-system.sh << 'EOF'
 #!/bin/bash
-echo "🛑 Stopping RPA System (1 orchestrator + 5 workers)..."
+echo "🛑 Stopping RPA Pod (1 orchestrator + 5 workers)..."
 
-containers=(rpa-orchestrator rpa-worker1 rpa-worker2 rpa-worker3 rpa-worker4 rpa-worker5)
+# Stop the entire pod (stops all containers in it)
+sudo -u rpauser podman pod stop rpa-pod 2>/dev/null || true
+echo "⏹️  RPA pod stopped"
 
-for container in "${containers[@]}"; do
-    if sudo -u rpauser podman container exists "$container" 2>/dev/null; then
-        echo "⏹️  Stopping $container..."
-        sudo -u rpauser podman stop "$container" --time 30 2>/dev/null || true
-        sudo -u rpauser podman rm "$container" 2>/dev/null || true
-        echo "✅ $container stopped and removed"
-    fi
-done
+# Remove the pod (removes all containers in it)
+sudo -u rpauser podman pod rm rpa-pod 2>/dev/null || true
+echo "🗑️  RPA pod removed"
 
 echo "✅ RPA System stopped successfully"
 EOF
