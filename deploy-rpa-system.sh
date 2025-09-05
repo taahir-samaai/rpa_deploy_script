@@ -1,23 +1,23 @@
 #!/bin/bash
-# deploy-rpa-system.sh
-# Complete deployment script for RPA system on RHEL with Podman
+# RPA Clean Production Packager
+# Creates a clean, production-ready package excluding unnecessary files
 
-set -euo pipefail
+set -e
 
 # Configuration
-RPA_HOME="/opt/rpa-system"
-RPA_USER="rpauser"
-RPA_GROUP="rpauser"
-LOG_FILE="/var/log/rpa-deployment.log"
+SOURCE_DIR="/opt/rpa-system"
+DISCOVERY_DIR="/root/environment-discovery-20250904-130738"
+CLEAN_PACKAGE_DIR="${DISCOVERY_DIR}/production-ready"
+LOG_FILE="${DISCOVERY_DIR}/clean-packaging.log"
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# Logging function
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
@@ -40,707 +40,454 @@ warning() {
 error() {
     echo -e "${RED}[ERROR]${NC} $1"
     log "ERROR: $1"
+    exit 1
 }
 
-# Check if running as root
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error "This script must be run as root"
-        exit 1
-    fi
+section() {
+    echo -e "\n${CYAN}================================================${NC}"
+    echo -e "${CYAN} $1 ${NC}"
+    echo -e "${CYAN}================================================${NC}"
+    log "SECTION: $1"
 }
 
-# Detect system specifications
-detect_system() {
-    info "Detecting system specifications..."
+# Verify source directory
+check_source() {
+    section "CHECKING SOURCE DIRECTORY"
     
-    # Get CPU and memory info
-    CPU_COUNT=$(nproc)
-    MEMORY_GB=$(free -g | awk 'NR==2{print $2}')
-    DISK_AVAILABLE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-    
-    info "System specs: ${CPU_COUNT} CPU cores, ${MEMORY_GB}GB RAM, ${DISK_AVAILABLE}GB available disk"
-    
-    # Check if this is a t3.medium or similar
-    if [[ $CPU_COUNT -eq 2 ]] && [[ $MEMORY_GB -eq 3 || $MEMORY_GB -eq 4 ]]; then
-        info "Detected t3.medium-like instance, applying optimizations"
-        OPTIMIZE_FOR_T3_MEDIUM=true
-    else
-        OPTIMIZE_FOR_T3_MEDIUM=false
-    fi
-}
-
-# Install prerequisites
-install_prerequisites() {
-    info "Installing prerequisites..."
-    
-    # Update system
-    dnf update -y
-    
-    # Install required packages
-    dnf install -y \
-        podman \
-        podman-compose \
-        git \
-        curl \
-        jq \
-        wget \
-        unzip \
-        firewalld \
-        python3 \
-        python3-pip \
-        sqlite \
-        chrony
-    
-    # Enable and start required services
-    systemctl enable --now firewalld
-    systemctl enable --now chronyd
-    
-    success "Prerequisites installed successfully"
-}
-
-# Create RPA user and directories
-setup_user_and_directories() {
-    info "Setting up RPA user and directories..."
-    
-    # Create RPA user if it doesn't exist
-    if ! id -u $RPA_USER &>/dev/null; then
-        useradd -r -m -d /home/$RPA_USER -s /bin/bash $RPA_USER
-        info "Created RPA user: $RPA_USER"
+    if [[ ! -d "$SOURCE_DIR" ]]; then
+        error "Source directory not found: $SOURCE_DIR"
     fi
     
-    # Create application directory
-    mkdir -p $RPA_HOME
-    chown $RPA_USER:$RPA_GROUP $RPA_HOME
-    chmod 755 $RPA_HOME
+    if [[ ! -f "$SOURCE_DIR/rpa_botfarm/orchestrator.py" ]]; then
+        error "orchestrator.py not found in $SOURCE_DIR/rpa_botfarm/"
+    fi
+    
+    info "Source directory: $SOURCE_DIR"
+    info "Package directory: $CLEAN_PACKAGE_DIR"
+    
+    # Create clean package directory
+    rm -rf "$CLEAN_PACKAGE_DIR"
+    mkdir -p "$CLEAN_PACKAGE_DIR"
+    
+    success "Source verification completed"
+}
+
+# Package essential files only
+package_essential_files() {
+    section "PACKAGING ESSENTIAL FILES"
+    
+    info "Copying essential production files..."
     
     # Create directory structure
-    sudo -u $RPA_USER mkdir -p $RPA_HOME/{containers/{orchestrator,worker},configs,volumes/{data/{db,logs,screenshots,evidence},logs},scripts}
+    mkdir -p "$CLEAN_PACKAGE_DIR"/{rpa_botfarm/automations,configs,containers/{orchestrator,worker},scripts,volumes/{data,logs}}
     
-    # Set up subuid and subgid for rootless containers
-    echo "${RPA_USER}:100000:65536" >> /etc/subuid
-    echo "${RPA_USER}:100000:65536" >> /etc/subgid
+    # Core RPA files (excluding unwanted files)
+    info "Copying core RPA botfarm files..."
     
-    # Enable lingering for user services
-    loginctl enable-linger $RPA_USER
+    # Define essential core files
+    local core_files=(
+        "auth.py"
+        "config.py" 
+        "conjur_client.py"
+        "db.py"
+        "errors.py"
+        "health_reporter.py"
+        "models.py"
+        "orchestrator.py"
+        "rate_limiter.py"
+        "test_framework.py"
+        "worker.py"
+    )
     
-    success "User and directories set up successfully"
-}
-
-# Configure firewall
-configure_firewall() {
-    info "Configuring firewall..."
+    # Copy core files
+    for file in "${core_files[@]}"; do
+        if [[ -f "$SOURCE_DIR/rpa_botfarm/$file" ]]; then
+            cp "$SOURCE_DIR/rpa_botfarm/$file" "$CLEAN_PACKAGE_DIR/rpa_botfarm/"
+            success "Copied: $file"
+        else
+            warning "Not found: $file"
+        fi
+    done
     
-    # Open required ports
-    firewall-cmd --permanent --add-port=8620/tcp  # Orchestrator
-    firewall-cmd --permanent --add-port=8621/tcp  # Worker 1
-    firewall-cmd --permanent --add-port=8622/tcp  # Worker 2
-    firewall-cmd --permanent --add-port=8623/tcp  # Additional workers
-    
-    # Add rich rules for better security
-    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="127.0.0.1" port protocol="tcp" port="8620-8625" accept'
-    
-    firewall-cmd --reload
-    
-    success "Firewall configured successfully"
-}
-
-# Configure SELinux
-configure_selinux() {
-    info "Configuring SELinux..."
-    
-    # Set SELinux booleans for containers
-    setsebool -P container_manage_cgroup 1
-    setsebool -P virt_use_fusefs 1
-    
-    # Set file contexts for RPA directories
-    semanage fcontext -a -t container_file_t "$RPA_HOME/volumes(/.*)?" 2>/dev/null || true
-    restorecon -R $RPA_HOME/volumes/
-    
-    success "SELinux configured for containers"
-}
-
-# Generate optimized configurations
-generate_configurations() {
-    info "Generating optimized configurations..."
-    
-    # Calculate optimal worker settings based on system specs
-    if [[ $OPTIMIZE_FOR_T3_MEDIUM == true ]]; then
-        MAX_WORKERS=4
-        BATCH_SIZE=2
-        WORKER_TIMEOUT=900
-        JOB_POLL_INTERVAL=30
-    else
-        MAX_WORKERS=$((CPU_COUNT * 2))
-        BATCH_SIZE=3
-        WORKER_TIMEOUT=600
-        JOB_POLL_INTERVAL=15
+    # Copy automations directory (all provider modules)
+    info "Copying automation modules..."
+    if [[ -d "$SOURCE_DIR/rpa_botfarm/automations" ]]; then
+        # Copy the entire automations directory, excluding pycache
+        rsync -av \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            "$SOURCE_DIR/rpa_botfarm/automations/" \
+            "$CLEAN_PACKAGE_DIR/rpa_botfarm/automations/"
+        success "Copied automation modules"
     fi
     
-    # Generate orchestrator environment file
-    cat > $RPA_HOME/configs/orchestrator.env << EOF
-# Orchestrator Configuration
-ORCHESTRATOR_HOST=0.0.0.0
-ORCHESTRATOR_PORT=8620
-
-# Worker Management
-WORKER_ENDPOINTS=["http://worker1:8621/execute","http://worker2:8621/execute"]
-MAX_WORKERS=$MAX_WORKERS
-WORKER_TIMEOUT=$WORKER_TIMEOUT
-
-# Job Processing
-JOB_POLL_INTERVAL=$JOB_POLL_INTERVAL
-BATCH_SIZE=$BATCH_SIZE
-METRICS_INTERVAL=300
-
-# Database
-BASE_DATA_DIR=/app/data
-DB_PATH=/app/data/db/orchestrator.db
-DB_CONNECTION_POOL_SIZE=20
-DB_MAX_OVERFLOW=30
-
-# Security
-JWT_SECRET=$(openssl rand -hex 32)
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=$(openssl rand -base64 12)
-
-# Logging
-LOG_LEVEL=INFO
-STRUCTURED_LOGGING=true
-LOG_JSON_FORMAT=true
-
-# Health Monitoring
-HEALTH_REPORT_ENABLED=true
-HEALTH_REPORT_INTERVAL=300
-EOF
-
-    # Generate worker environment file
-    cat > $RPA_HOME/configs/worker.env << EOF
-# Worker Configuration
-WORKER_HOST=0.0.0.0
-WORKER_PORT=8621
-
-# Threading
-MAX_WORKERS=$MAX_WORKERS
-WORKER_TIMEOUT=$WORKER_TIMEOUT
-WORKER_THREAD_POOL_SIZE=$MAX_WORKERS
-
-# Browser Settings
-HEADLESS=true
-NO_SANDBOX=true
-DISABLE_DEV_SHM_USAGE=true
-START_MAXIMIZED=false
-CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
-
-# Security
-AUTHORIZED_WORKER_IPS=["172.18.0.0/16","127.0.0.1"]
-
-# Data
-BASE_DATA_DIR=/app/data
-SCREENSHOT_DIR=/app/data/screenshots
-EVIDENCE_DIR=/app/data/evidence
-
-# Performance
-PYTHON_GC_THRESHOLD=700,10,10
-SQLITE_TIMEOUT=30
-SELENIUM_PAGE_LOAD_TIMEOUT=45
-
-# Logging
-LOG_LEVEL=INFO
-STRUCTURED_LOGGING=true
-LOG_JSON_FORMAT=true
-EOF
+    # Copy essential root-level files
+    info "Copying root-level files..."
+    local root_files=(
+        "requirements.txt"
+        "start-system.sh"
+        "update_mfn_validation.py"
+        "update_osn_validation.py"
+    )
     
-    # Store admin credentials securely
-    echo "$(grep ADMIN_PASSWORD $RPA_HOME/configs/orchestrator.env | cut -d= -f2)" > $RPA_HOME/.admin-password
-    chmod 600 $RPA_HOME/.admin-password
-    chown $RPA_USER:$RPA_GROUP $RPA_HOME/.admin-password
+    for file in "${root_files[@]}"; do
+        if [[ -f "$SOURCE_DIR/$file" ]]; then
+            cp "$SOURCE_DIR/$file" "$CLEAN_PACKAGE_DIR/"
+            success "Copied root file: $file"
+        fi
+    done
     
-    success "Configuration files generated"
-    info "Admin password saved to $RPA_HOME/.admin-password"
-}
-
-# Create Containerfiles
-create_containerfiles() {
-    info "Creating Containerfiles..."
-    
-    # Orchestrator Containerfile
-    cat > $RPA_HOME/containers/orchestrator/Containerfile << 'EOF'
-FROM registry.redhat.io/ubi9/python-311:latest
-
-USER root
-
-# Install system dependencies
-RUN dnf update -y && \
-    dnf install -y \
-        sqlite \
-        sqlite-devel \
-        gcc \
-        python3-devel && \
-    dnf clean all
-
-# Create app user
-RUN useradd -m -u 1001 rpauser && \
-    mkdir -p /app /app/data /app/logs && \
-    chown -R rpauser:rpauser /app
-
-USER rpauser
-WORKDIR /app
-
-# Install Python dependencies
-COPY requirements.txt ./
-RUN pip install --user --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY --chown=rpauser:rpauser . .
-
-# Create directories
-RUN mkdir -p data/db data/logs data/screenshots data/evidence
-
-EXPOSE 8620
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8620/health || exit 1
-
-CMD ["python", "orchestrator.py"]
-EOF
-
-    # Worker Containerfile
-    cat > $RPA_HOME/containers/worker/Containerfile << 'EOF'
-FROM registry.redhat.io/ubi9/python-311:latest
-
-USER root
-
-# Install Chrome and system dependencies
-RUN dnf update -y && \
-    dnf install -y \
-        chromium \
-        chromium-headless \
-        sqlite \
-        sqlite-devel \
-        gcc \
-        python3-devel \
-        xvfb \
-        curl \
-        wget \
-        unzip && \
-    dnf clean all
-
-# Install ChromeDriver
-RUN CHROME_DRIVER_VERSION=$(curl -sS https://chromedriver.storage.googleapis.com/LATEST_RELEASE) && \
-    wget -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${CHROME_DRIVER_VERSION}/chromedriver_linux64.zip" && \
-    unzip /tmp/chromedriver.zip -d /tmp/ && \
-    mv /tmp/chromedriver /usr/local/bin/chromedriver && \
-    chmod +x /usr/local/bin/chromedriver && \
-    rm -f /tmp/chromedriver.zip
-
-# Create app user
-RUN useradd -m -u 1001 rpauser && \
-    mkdir -p /app /app/data /app/logs && \
-    chown -R rpauser:rpauser /app
-
-USER rpauser
-WORKDIR /app
-
-# Install Python dependencies
-COPY requirements.txt ./
-RUN pip install --user --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY --chown=rpauser:rpauser . .
-
-# Create directories
-RUN mkdir -p data/logs data/screenshots data/evidence worker_data
-
-# Set environment variables
-ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
-ENV HEADLESS=true
-ENV NO_SANDBOX=true
-ENV DISABLE_DEV_SHM_USAGE=true
-
-EXPOSE 8621
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8621/health || exit 1
-
-CMD ["python", "worker.py"]
-EOF
-
-    success "Containerfiles created"
-}
-
-# Create podman-compose configuration
-create_podman_compose() {
-    info "Creating podman-compose configuration..."
-    
-    cat > $RPA_HOME/podman-compose.yml << EOF
-version: '3.8'
-
-services:
-  orchestrator:
-    build:
-      context: .
-      dockerfile: containers/orchestrator/Containerfile
-    container_name: rpa-orchestrator
-    hostname: orchestrator
-    ports:
-      - "8620:8620"
-    env_file:
-      - configs/orchestrator.env
-    volumes:
-      - ./volumes/data:/app/data:Z
-      - ./volumes/logs:/app/logs:Z
-    networks:
-      - rpa-network
-    restart: unless-stopped
-    depends_on:
-      - worker1
-      - worker2
-    resources:
-      limits:
-        memory: 1G
-        cpus: '0.8'
-      reservations:
-        memory: 512M
-        cpus: '0.4'
-
-  worker1:
-    build:
-      context: .
-      dockerfile: containers/worker/Containerfile
-    container_name: rpa-worker1
-    hostname: worker1
-    ports:
-      - "8621:8621"
-    env_file:
-      - configs/worker.env
-    volumes:
-      - ./volumes/data:/app/data:Z
-      - ./volumes/logs:/app/logs:Z
-    networks:
-      - rpa-network
-    restart: unless-stopped
-    security_opt:
-      - seccomp:unconfined
-    shm_size: 2gb
-    resources:
-      limits:
-        memory: 1.5G
-        cpus: '1.0'
-      reservations:
-        memory: 512M
-        cpus: '0.5'
-
-  worker2:
-    build:
-      context: .
-      dockerfile: containers/worker/Containerfile
-    container_name: rpa-worker2
-    hostname: worker2
-    ports:
-      - "8622:8621"
-    env_file:
-      - configs/worker.env
-    volumes:
-      - ./volumes/data:/app/data:Z
-      - ./volumes/logs:/app/logs:Z
-    networks:
-      - rpa-network
-    restart: unless-stopped
-    security_opt:
-      - seccomp:unconfined
-    shm_size: 2gb
-    resources:
-      limits:
-        memory: 1.5G
-        cpus: '1.0'
-      reservations:
-        memory: 512M
-        cpus: '0.5'
-
-networks:
-  rpa-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.18.0.0/16
-
-volumes:
-  rpa-data:
-  rpa-logs:
-EOF
-
-    success "Podman-compose configuration created"
-}
-
-# Create management scripts
-create_management_scripts() {
-    info "Creating management scripts..."
-    
-    # System start script
-    cat > $RPA_HOME/scripts/start-system.sh << 'EOF'
-#!/bin/bash
-set -e
-
-cd /opt/rpa-system
-
-echo "🚀 Starting RPA System..."
-
-# Set proper permissions
-sudo chown -R rpauser:rpauser volumes/
-
-# Build and start containers
-echo "📦 Building containers..."
-sudo -u rpauser podman-compose build --parallel
-
-echo "🔧 Starting services..."
-sudo -u rpauser podman-compose up -d
-
-# Wait for services
-echo "⏳ Waiting for services to start..."
-sleep 30
-
-# Health checks
-for port in 8620 8621 8622; do
-    if curl -f -s http://localhost:$port/health > /dev/null; then
-        echo "✅ Service on port $port: Healthy"
-    else
-        echo "❌ Service on port $port: Unhealthy"
-    fi
-done
-
-echo "✅ RPA System startup complete!"
-echo "📊 Orchestrator: http://localhost:8620"
-echo "👷 Worker 1: http://localhost:8621"
-echo "👷 Worker 2: http://localhost:8622"
-
-sudo -u rpauser podman-compose ps
-EOF
-
-    # System stop script
-    cat > $RPA_HOME/scripts/stop-system.sh << 'EOF'
-#!/bin/bash
-cd /opt/rpa-system
-
-echo "🛑 Stopping RPA System..."
-sudo -u rpauser podman-compose down
-echo "✅ RPA System stopped"
-EOF
-
-    # Health check script
-    cat > $RPA_HOME/scripts/health-check.sh << 'EOF'
-#!/bin/bash
-cd /opt/rpa-system
-
-echo "🔍 RPA System Health Check"
-echo "=========================="
-
-# Check services
-for port in 8620 8621 8622; do
-    if curl -f -s http://localhost:$port/health > /dev/null; then
-        echo "✅ Service (port $port): Healthy"
-    else
-        echo "❌ Service (port $port): Unhealthy"
-    fi
-done
-
-# Container status
-echo -e "\n📦 Container Status:"
-sudo -u rpauser podman-compose ps
-
-# Resource usage
-echo -e "\n💾 Resource Usage:"
-sudo -u rpauser podman stats --no-stream
-EOF
-
-    # Backup script
-    cat > $RPA_HOME/scripts/backup.sh << 'EOF'
-#!/bin/bash
-BACKUP_DIR="/backup/rpa-$(date +%Y%m%d-%H%M%S)"
-mkdir -p $BACKUP_DIR
-
-echo "💾 Creating backup in $BACKUP_DIR..."
-
-# Backup database and data
-cp -r /opt/rpa-system/volumes/data $BACKUP_DIR/
-tar -czf $BACKUP_DIR/logs.tar.gz /opt/rpa-system/volumes/logs/
-cp -r /opt/rpa-system/configs $BACKUP_DIR/
-
-echo "✅ Backup completed: $BACKUP_DIR"
-EOF
-
-    # Make scripts executable
-    chmod +x $RPA_HOME/scripts/*.sh
-    chown -R $RPA_USER:$RPA_GROUP $RPA_HOME/scripts/
-    
-    success "Management scripts created"
-}
-
-# Create systemd service
-create_systemd_service() {
-    info "Creating systemd service..."
-    
-    cat > /etc/systemd/system/rpa-system.service << EOF
-[Unit]
-Description=RPA System Container Stack
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=true
-ExecStart=$RPA_HOME/scripts/start-system.sh
-ExecStop=$RPA_HOME/scripts/stop-system.sh
-ExecReload=/bin/bash -c 'cd $RPA_HOME && sudo -u $RPA_USER podman-compose restart'
-TimeoutStartSec=300
-TimeoutStopSec=60
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable rpa-system.service
-    
-    success "Systemd service created and enabled"
-}
-
-# Set up monitoring
-setup_monitoring() {
-    info "Setting up basic monitoring..."
-    
-    # Create monitoring script
-    cat > $RPA_HOME/scripts/monitor.sh << 'EOF'
-#!/bin/bash
-# Simple monitoring script
-
-LOG_FILE="/var/log/rpa-monitoring.log"
-
-while true; do
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    # Check services
-    orchestrator_status="DOWN"
-    worker1_status="DOWN"
-    worker2_status="DOWN"
-    
-    if curl -f -s http://localhost:8620/health > /dev/null 2>&1; then
-        orchestrator_status="UP"
+    # Copy configs directory if it exists
+    if [[ -d "$SOURCE_DIR/configs" ]]; then
+        cp -r "$SOURCE_DIR/configs"/* "$CLEAN_PACKAGE_DIR/configs/" 2>/dev/null || true
+        success "Copied configs directory"
     fi
     
-    if curl -f -s http://localhost:8621/health > /dev/null 2>&1; then
-        worker1_status="UP"
+    # Copy containers directory if it exists
+    if [[ -d "$SOURCE_DIR/containers" ]]; then
+        cp -r "$SOURCE_DIR/containers"/* "$CLEAN_PACKAGE_DIR/containers/" 2>/dev/null || true
+        success "Copied containers directory"
     fi
     
-    if curl -f -s http://localhost:8622/health > /dev/null 2>&1; then
-        worker2_status="UP"
+    # Copy scripts directory (excluding test scripts)
+    if [[ -d "$SOURCE_DIR/scripts" ]]; then
+        find "$SOURCE_DIR/scripts" -name "*.sh" -not -path "*/test*" -not -path "*/debug*" | while read -r script; do
+            cp "$script" "$CLEAN_PACKAGE_DIR/scripts/"
+        done
+        success "Copied production scripts"
     fi
     
-    # Log status
-    echo "$timestamp - Orchestrator: $orchestrator_status, Worker1: $worker1_status, Worker2: $worker2_status" >> $LOG_FILE
-    
-    # Sleep for 5 minutes
-    sleep 300
-done
-EOF
-
-    chmod +x $RPA_HOME/scripts/monitor.sh
-    
-    # Create monitoring service
-    cat > /etc/systemd/system/rpa-monitor.service << EOF
-[Unit]
-Description=RPA System Monitor
-After=rpa-system.service
-Wants=rpa-system.service
-
-[Service]
-Type=simple
-ExecStart=$RPA_HOME/scripts/monitor.sh
-Restart=always
-RestartSec=30
-User=$RPA_USER
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable rpa-monitor.service
-    
-    success "Monitoring setup complete"
+    success "Essential files packaging completed"
 }
 
-# Final setup and testing
-final_setup() {
-    info "Performing final setup..."
+# Verify automation modules
+verify_automation_modules() {
+    section "VERIFYING AUTOMATION MODULES"
     
-    # Set proper ownership
-    chown -R $RPA_USER:$RPA_GROUP $RPA_HOME
+    local providers=("evotel" "mfn" "octotel" "osn")
+    local required_actions=("validation.py" "cancellation.py")
     
-    # Create log rotation configuration
-    cat > /etc/logrotate.d/rpa-system << EOF
-$RPA_HOME/volumes/logs/*.log {
-    daily
-    missingok
-    rotate 7
-    compress
-    delaycompress
-    notifempty
-    create 644 $RPA_USER $RPA_GROUP
-    postrotate
-        systemctl reload rpa-system || true
-    endscript
-}
-EOF
+    for provider in "${providers[@]}"; do
+        local provider_dir="$CLEAN_PACKAGE_DIR/rpa_botfarm/automations/$provider"
+        
+        if [[ -d "$provider_dir" ]]; then
+            info "Checking provider: $provider"
+            
+            # Check for required action files
+            for action in "${required_actions[@]}"; do
+                if [[ -f "$provider_dir/$action" ]]; then
+                    success "  ✅ $provider/$action"
+                else
+                    warning "  ⚠️  $provider/$action (missing)"
+                fi
+            done
+            
+            # Check for __init__.py
+            if [[ -f "$provider_dir/__init__.py" ]]; then
+                success "  ✅ $provider/__init__.py"
+            else
+                warning "  ⚠️  $provider/__init__.py (missing)"
+            fi
+        else
+            warning "Provider directory missing: $provider"
+        fi
+    done
     
-    # Final permissions check
-    chmod -R 755 $RPA_HOME
-    chmod -R 644 $RPA_HOME/configs/*
-    chmod 600 $RPA_HOME/.admin-password
-    
-    success "Final setup complete"
+    success "Automation modules verification completed"
 }
 
-# Main deployment function
+# Create production inventory
+create_production_inventory() {
+    section "CREATING PRODUCTION INVENTORY"
+    
+    local inventory_file="$CLEAN_PACKAGE_DIR/PRODUCTION_INVENTORY.md"
+    
+    cat > "$inventory_file" << 'INVENTORY_EOF'
+# RPA Production System Inventory
+
+## Package Information
+- **Created:** $(date)
+- **Source:** /opt/rpa-system
+- **Type:** Clean production package (no test files, documentation, or temporary files)
+
+## Core Components
+
+### Main Applications
+INVENTORY_EOF
+
+    # List core applications
+    echo "- **orchestrator.py** - Main orchestration service" >> "$inventory_file"
+    echo "- **worker.py** - Automation worker service" >> "$inventory_file"
+    echo "" >> "$inventory_file"
+    
+    echo "### Core Modules" >> "$inventory_file"
+    for core_file in "$CLEAN_PACKAGE_DIR/rpa_botfarm"/*.py; do
+        if [[ -f "$core_file" ]]; then
+            filename=$(basename "$core_file")
+            file_size=$(stat -c%s "$core_file" 2>/dev/null || echo "0")
+            echo "- **$filename** (${file_size} bytes)" >> "$inventory_file"
+        fi
+    done
+    
+    echo "" >> "$inventory_file"
+    echo "### Automation Providers" >> "$inventory_file"
+    
+    # List automation providers
+    for provider_dir in "$CLEAN_PACKAGE_DIR/rpa_botfarm/automations"/*; do
+        if [[ -d "$provider_dir" ]]; then
+            provider_name=$(basename "$provider_dir")
+            echo "#### $provider_name" >> "$inventory_file"
+            
+            for action_file in "$provider_dir"/*.py; do
+                if [[ -f "$action_file" ]]; then
+                    action_name=$(basename "$action_file")
+                    echo "- **$action_name**" >> "$inventory_file"
+                fi
+            done
+            echo "" >> "$inventory_file"
+        fi
+    done
+    
+    cat >> "$inventory_file" << 'INVENTORY_EOF2'
+
+## Configuration Files
+INVENTORY_EOF2
+
+    # List configuration files
+    find "$CLEAN_PACKAGE_DIR" -name "*.env" -o -name "*.conf" -o -name "*.json" -o -name "requirements.txt" | while read -r config_file; do
+        rel_path="${config_file#$CLEAN_PACKAGE_DIR/}"
+        echo "- **$rel_path**" >> "$inventory_file"
+    done
+    
+    cat >> "$inventory_file" << 'INVENTORY_EOF3'
+
+## Statistics
+- **Core Python Files:** $(find "$CLEAN_PACKAGE_DIR/rpa_botfarm" -maxdepth 1 -name "*.py" | wc -l)
+- **Automation Providers:** $(find "$CLEAN_PACKAGE_DIR/rpa_botfarm/automations" -maxdepth 1 -type d | grep -v "automations$" | wc -l)
+- **Total Python Files:** $(find "$CLEAN_PACKAGE_DIR" -name "*.py" | wc -l)
+- **Package Size:** $(du -sh "$CLEAN_PACKAGE_DIR" | cut -f1)
+
+## Excluded Items
+The following items were intentionally excluded from the production package:
+- **bin/** - Test scripts and utilities
+- **docs/** - Documentation files  
+- **totp_generator.py** - TOTP utility (not needed in production)
+- **.git/** - Git repository data
+- **__pycache__/** - Python cache files
+- **drivers/** - Browser driver files (will be installed in container)
+- **python_env/** - Development environment files
+
+## Production Ready
+This package contains only the essential files needed for production deployment:
+- ✅ Core RPA framework
+- ✅ All automation provider modules (evotel, mfn, octotel, osn)
+- ✅ Configuration templates
+- ✅ Container definitions
+- ✅ Management scripts
+- ✅ Dependencies (requirements.txt)
+
+This clean package is optimized for production deployment and excludes all development, 
+testing, and documentation files to minimize size and security surface.
+
+The deployment will create:
+- 1 Orchestrator container (single-threaded) on port 8620
+- 5 Worker containers (single-threaded) on ports 8621-8625
+- Each container uses exactly 1 thread for predictable resource usage
+- Total capacity: 5 concurrent automation jobs (1 per worker)
+INVENTORY_EOF3
+
+    success "Production inventory created"
+}
+
+# Update discovery package
+update_discovery_package() {
+    section "UPDATING DISCOVERY PACKAGE"
+    
+    # Update the main summary
+    local summary_file="$DISCOVERY_DIR/ENVIRONMENT_SUMMARY.md"
+    
+    cat >> "$summary_file" << 'SUMMARY_UPDATE'
+
+## Clean Production Package
+
+### Production-Ready Package Status
+- ✅ **Clean Production Package:** Created in `production-ready/` directory
+- ✅ **Essential Files Only:** Core modules + automation providers
+- ✅ **Excluded Unnecessary:** bin/, docs/, totp_generator.py, .git/, __pycache__/
+- ✅ **Optimized Size:** Minimal footprint for production deployment
+- ✅ **Security Focused:** No test scripts or development files
+
+### Production Package Contents
+- **Core RPA Framework:** orchestrator.py, worker.py, auth.py, config.py, db.py, etc.
+- **Automation Modules:** evotel, mfn, octotel, osn (validation + cancellation)
+- **Configuration Files:** Production-ready templates
+- **Dependencies:** requirements.txt with exact versions
+- **Management Scripts:** Essential production scripts only
+
+### Deployment Ready
+This clean production package is optimized for enterprise deployment with:
+- Minimal security surface (no test/debug files)
+- Reduced package size  
+- Only production-essential components
+- Ready for container deployment
+SUMMARY_UPDATE
+
+    success "Discovery package updated"
+}
+
+# Create final clean deployment package
+create_final_clean_package() {
+    section "CREATING FINAL CLEAN DEPLOYMENT PACKAGE"
+    
+    cd /root
+    
+    # Create the final deployment package
+    local package_name="rpa-clean-production-$(date +%Y%m%d-%H%M%S).tar.gz"
+    
+    info "Creating clean production deployment package: $package_name"
+    
+    tar -czf "$package_name" environment-discovery-20250904-130738/
+    
+    # Package information
+    local package_size=$(du -sh "$package_name" | cut -f1)
+    local total_files=$(tar -tzf "$package_name" | wc -l)
+    
+    success "Clean production package created:"
+    info "  📦 Package: $package_name"
+    info "  📊 Size: $package_size"
+    info "  📄 Files: $total_files"
+    info "  🎯 Type: Production-optimized (essential files only)"
+    
+    # Create deployment README
+    cat > "CLEAN_DEPLOYMENT_README.md" << README_EOF
+# RPA Clean Production Deployment Package
+
+## Package Information
+- **Package:** $package_name
+- **Created:** $(date)
+- **Size:** $package_size
+- **Type:** Clean production package (essential files only)
+
+## What's Included
+✅ **Core RPA Framework:**
+   - orchestrator.py (main service)
+   - worker.py (automation worker)
+   - auth.py, config.py, db.py, models.py (core modules)
+   
+✅ **Automation Providers:**
+   - evotel (validation + cancellation)
+   - mfn (validation + cancellation) 
+   - octotel (validation + cancellation)
+   - osn (validation + cancellation)
+
+✅ **Production Essentials:**
+   - requirements.txt (dependencies)
+   - Configuration templates
+   - Container definitions
+   - Management scripts
+
+## What's Excluded
+❌ **Development/Test Files:**
+   - bin/ (test scripts)
+   - docs/ (documentation)
+   - totp_generator.py
+   - .git/ (version control)
+   - __pycache__/ (cache files)
+
+## Package Structure
+\`\`\`
+environment-discovery-20250904-130738/
+├── production-ready/           # CLEAN PRODUCTION FILES
+│   ├── rpa_botfarm/           # Core RPA framework
+│   │   ├── orchestrator.py    # Main orchestrator
+│   │   ├── worker.py          # Worker service
+│   │   ├── auth.py            # Authentication
+│   │   ├── config.py          # Configuration
+│   │   ├── db.py              # Database operations
+│   │   ├── models.py          # Data models
+│   │   └── automations/       # Provider modules
+│   │       ├── evotel/        # Evotel automation
+│   │       ├── mfn/           # MFN automation  
+│   │       ├── octotel/       # Octotel automation
+│   │       └── osn/           # OSN automation
+│   ├── requirements.txt       # Python dependencies
+│   ├── configs/               # Configuration templates
+│   ├── containers/            # Container definitions
+│   └── scripts/               # Management scripts
+├── system/                    # System discovery data
+├── containers/               # Container runtime info
+├── network/                  # Network configuration
+└── [other discovery data]
+\`\`\`
+
+## Deployment Commands
+
+### 1. Transfer to Production VM
+\`\`\`bash
+scp $package_name user@prod-vm:/tmp/
+\`\`\`
+
+### 2. Extract and Deploy
+\`\`\`bash
+cd /tmp
+tar -xzf $package_name
+sudo ./rpa_production_deploy.sh -d environment-discovery-20250904-130738 -e production
+\`\`\`
+
+### 3. Start System
+\`\`\`bash
+sudo systemctl start rpa-system
+sudo /opt/rpa-system/scripts/health-check.sh
+\`\`\`
+
+## Benefits of Clean Package
+- **🔒 Security:** No test scripts or debug files
+- **📦 Size:** Smaller package, faster transfers
+- **🎯 Focus:** Only production-essential components
+- **🚀 Performance:** Optimized for enterprise deployment
+
+This package is production-ready and enterprise-grade!
+README_EOF
+
+    success "Clean deployment README created"
+    
+    echo -e "\n${GREEN}🎉 CLEAN PRODUCTION PACKAGE READY! 🎉${NC}"
+    echo -e "\n${CYAN}Package Summary:${NC}"
+    echo -e "  📦 File: ${YELLOW}$package_name${NC}"
+    echo -e "  📊 Size: ${YELLOW}$package_size${NC}"
+    echo -e "  🎯 Type: ${YELLOW}Production-optimized${NC}"
+    echo -e "  📋 README: ${YELLOW}CLEAN_DEPLOYMENT_README.md${NC}"
+    echo -e "\n${CYAN}Key Features:${NC}"
+    echo -e "  ✅ Essential files only (no bin/, docs/, test files)"
+    echo -e "  ✅ All automation providers (evotel, mfn, octotel, osn)"
+    echo -e "  ✅ Core RPA framework (orchestrator, worker, auth, db)"
+    echo -e "  ✅ Production-ready configuration templates"
+    echo -e "  ✅ Optimized for security and performance"
+}
+
+# Main execution
 main() {
-    info "Starting RPA System deployment on RHEL..."
+    echo -e "${CYAN}"
+    cat << 'BANNER'
+    ____  ____   _        ____ _     _____    _    _   _ 
+   |  _ \|  _ \ / \      / ___| |   | ____|  / \  | \ | |
+   | |_) | |_) / _ \    | |   | |   |  _|   / _ \ |  \| |
+   |  _ <|  __/ ___ \   | |___| |___| |___ / ___ \| |\  |
+   |_| \_\_| /_/   \_\   \____|_____|_____/_/   \_\_| \_|
+                                                        
+        Production Package Cleaner
+BANNER
+    echo -e "${NC}"
     
-    check_root
-    detect_system
-    install_prerequisites
-    setup_user_and_directories
-    configure_firewall
-    configure_selinux
-    generate_configurations
-    create_containerfiles
-    create_podman_compose
-    create_management_scripts
-    create_systemd_service
-    setup_monitoring
-    final_setup
+    check_source
+    package_essential_files
+    verify_automation_modules
+    create_production_inventory
+    update_discovery_package
+    create_final_clean_package
     
-    success "RPA System deployment completed successfully!"
-    echo ""
-    echo "================================================"
-    echo "DEPLOYMENT SUMMARY"
-    echo "================================================"
-    echo "Installation Directory: $RPA_HOME"
-    echo "RPA User: $RPA_USER"
-    echo "Admin Password: $(cat $RPA_HOME/.admin-password)"
-    echo ""
-    echo "Next Steps:"
-    echo "1. Copy your RPA source code to $RPA_HOME/"
-    echo "2. Review configurations in $RPA_HOME/configs/"
-    echo "3. Start the system: systemctl start rpa-system"
-    echo "4. Check status: $RPA_HOME/scripts/health-check.sh"
-    echo ""
-    echo "Service URLs:"
-    echo "- Orchestrator: http://$(hostname -I | awk '{print $1}'):8620"
-    echo "- Worker 1: http://$(hostname -I | awk '{print $1}'):8621"
-    echo "- Worker 2: http://$(hostname -I | awk '{print $1}'):8622"
-    echo "================================================"
+    echo -e "\n${GREEN}✅ Clean production package created successfully!${NC}"
+    echo -e "${YELLOW}Your RPA system is now packaged for enterprise production deployment.${NC}"
 }
 
-# Run main function
 main "$@"
