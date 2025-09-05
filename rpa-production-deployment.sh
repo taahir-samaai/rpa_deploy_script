@@ -483,6 +483,17 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --user --no-cache-dir -r requirements.txt
 
+# Copy core application files for orchestrator
+COPY --chown=rpauser:rpauser rpa_botfarm/orchestrator.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/config.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/auth.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/db.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/models.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/errors.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/health_reporter.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/rate_limiter.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/conjur_client.py ./
+
 COPY --chown=rpauser:rpauser . .
 RUN mkdir -p data/{db,logs,screenshots,evidence} logs temp
 
