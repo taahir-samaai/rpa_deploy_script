@@ -534,6 +534,18 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --user --no-cache-dir -r requirements.txt
 
+# Copy core application files for worker
+COPY --chown=rpauser:rpauser rpa_botfarm/worker.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/config.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/models.py ./
+COPY --chown=rpauser:rpauser rpa_botfarm/errors.py ./
+
+# Copy automation modules - this is the key part for your RPA system
+COPY --chown=rpauser:rpauser rpa_botfarm/automations/ ./automations/
+
+# Copy drivers if they exist
+COPY --chown=rpauser:rpauser rpa_botfarm/drivers/ ./drivers/
+
 COPY --chown=rpauser:rpauser . .
 RUN mkdir -p data/{logs,screenshots,evidence} worker_data logs temp
 
